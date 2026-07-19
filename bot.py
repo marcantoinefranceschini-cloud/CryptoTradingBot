@@ -5,51 +5,44 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 import aiohttp
 
-# Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Configs
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY')
 ETHERSCAN_API = os.getenv('ETHERSCAN_API_KEY')
 
-# Supabase Client
+# Supabase
 supabase = None
 try:
     from supabase import create_client
-    supabase = create_client(url=SUPABASE_URL, key=SUPABASE_KEY)
-    logger.info("✅ Supabase connected!")
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    logger.info("✅ Supabase OK")
 except Exception as e:
-    logger.error(f"❌ Supabase error: {e}")
-    supabase = None
+    logger.error(f"❌ Supabase: {e}")
 
 class TokenAnalyzer:
-    """Analyse les tokens"""
-    
-    async def get_token_info(self, ca: str) -> dict:
-        """Récupère infos du token"""
+    async def get_token_info(self, ca: str):
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(f"https://api.dexscreener.com/latest/dex/search?q={ca}", timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                url = f"https://api.dexscreener.com/latest/dex/search?q={ca}"
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         if data.get('pairs'):
                             return data['pairs'][0]
             return None
         except Exception as e:
-            logger.error(f"Error fetching token: {e}")
+            logger.error(f"Token fetch error: {e}")
             return None
     
-    def calculate_score(self, token_data: dict) -> tuple[int, str]:
-        """Calcule score simplifié"""
+    def calculate_score(self, token_data):
         if not token_data:
-            return 0, "❌ Token not found"
+            return 0, "Not found"
         
-        score = 50  # Base
+        score = 50
         
-        # Liquidity bonus
         liq = float(token_data.get('liquidity', {}).get('usd', 0) or 0)
         if liq > 100000:
             score += 20
@@ -58,32 +51,25 @@ class TokenAnalyzer:
         elif liq > 10000:
             score += 10
         
-        # Volume bonus
         vol = float(token_data.get('volume', {}).get('h24', 0) or 0)
         if vol > 0:
             ratio = vol / max(liq, 1)
             if ratio < 10:
                 score += 15
-            elif ratio < 20:
-                score += 10
         
-        # Price action
         price_change = float(token_data.get('priceChange', {}).get('h24', 0) or 0)
         if -50 < price_change < 50:
             score += 15
         
-        return min(100, score), "✅ Analyzed"
+        return min(100, score), "OK"
 
 class TradingBot:
-    """Bot principal"""
-    
     def __init__(self):
         self.analyzer = TokenAnalyzer()
         self.app = Application.builder().token(TELEGRAM_TOKEN).build()
         self.setup_handlers()
     
     def setup_handlers(self):
-        """Configure handlers"""
         self.app.add_handler(CommandHandler("start", self.start))
         self.app.add_handler(CommandHandler("setup", self.setup_user))
         self.app.add_handler(CommandHandler("analyze", self.analyze_token))
@@ -92,41 +78,26 @@ class TradingBot:
         self.app.add_handler(CallbackQueryHandler(self.button_callback))
     
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Commande /start"""
         user_id = update.effective_user.id
         
-        if not supabase:
-            await update.message.reply_text("⚠️ Database connection issue. Try /setup anyway!")
-            return
-        
         try:
-            user = supabase.table('users').select('*').eq('id', user_id).execute()
-            
-            if not user.data:
-                await update.message.reply_text(
-                    "🤖 **Welcome to CryptoBot!**\n\n"
-                    "Use /setup to configure your wallet!"
-                )
+            if supabase:
+                user = supabase.table('users').select('*').eq('id', user_id).execute()
+                if user.data:
+                    await update.message.reply_text(f"👋 Welcome back!\n💰 Wallet: {user.data[0]['wallet'][:10]}...")
+                else:
+                    await update.message.reply_text("🤖 Welcome!\n\nUse /setup to configure")
             else:
-                await update.message.reply_text(
-                    f"👋 Welcome back!\n\n"
-                    f"💰 Wallet: {user.data[0]['wallet'][:10]}...\n"
-                    f"Use /status to see your trades!"
-                )
+                await update.message.reply_text("🤖 Welcome!\n\nUse /setup to configure")
         except Exception as e:
-            logger.error(f"Error in start: {e}")
+            logger.error(f"Start error: {e}")
             await update.message.reply_text(f"❌ Error: {str(e)}")
     
     async def setup_user(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Setup user"""
-        await update.message.reply_text(
-            "⚙️ **SETUP**\n\n"
-            "1️⃣ Send your wallet address (0x...)"
-        )
+        await update.message.reply_text("⚙️ SETUP\n\n1️⃣ Send wallet address (0x...)")
         context.user_data['setup_step'] = 1
     
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle text messages"""
         if 'setup_step' not in context.user_data:
             return
         
@@ -136,12 +107,11 @@ class TradingBot:
         
         if step == 1:
             if not text.startswith('0x') or len(text) != 42:
-                await update.message.reply_text("❌ Invalid address. Send a valid Ethereum address (0x...)")
+                await update.message.reply_text("❌ Invalid. Send 0x...")
                 return
-            
             context.user_data['wallet'] = text
             context.user_data['setup_step'] = 2
-            await update.message.reply_text("✅ Wallet saved!\n\n2️⃣ Budget per trade? (e.g., 50 for $50)")
+            await update.message.reply_text("✅ Wallet saved!\n\n2️⃣ Budget per trade? ($)")
         
         elif step == 2:
             try:
@@ -150,7 +120,7 @@ class TradingBot:
                     raise ValueError
                 context.user_data['budget'] = budget
                 context.user_data['setup_step'] = 3
-                await update.message.reply_text("✅ Budget: $" + str(budget) + "\n\n3️⃣ TP target? (e.g., 50 for +50%)")
+                await update.message.reply_text(f"✅ Budget: ${budget}\n\n3️⃣ TP target? (+%)")
             except:
                 await update.message.reply_text("❌ Invalid number")
         
@@ -161,7 +131,7 @@ class TradingBot:
                     raise ValueError
                 context.user_data['tp'] = tp
                 context.user_data['setup_step'] = 4
-                await update.message.reply_text("✅ TP: +" + str(tp) + "%\n\n4️⃣ Stop loss? (e.g., 30 for -30%)")
+                await update.message.reply_text(f"✅ TP: +{tp}%\n\n4️⃣ Stop loss? (-%)")
             except:
                 await update.message.reply_text("❌ Invalid number")
         
@@ -183,24 +153,23 @@ class TradingBot:
                         }).execute()
                         
                         await update.message.reply_text(
-                            "✅ **SETUP COMPLETE!**\n\n"
+                            "✅ **SETUP DONE!**\n\n"
                             f"💰 Budget: ${context.user_data['budget']}\n"
                             f"📈 TP: +{context.user_data['tp']}%\n"
                             f"📉 SL: -{sl}%\n\n"
-                            "Send a CA (Contract Address) to analyze a token!"
+                            "Send CA to analyze!"
                         )
                     except Exception as e:
-                        logger.error(f"Supabase save error: {e}")
-                        await update.message.reply_text(f"⚠️ Setup saved locally (DB error: {str(e)})")
+                        logger.error(f"DB error: {e}")
+                        await update.message.reply_text("⚠️ Setup saved (DB issue)")
                 else:
-                    await update.message.reply_text("⚠️ Database offline. Setup saved locally!")
+                    await update.message.reply_text("⚠️ DB offline. Setup saved!")
                 
                 del context.user_data['setup_step']
             except:
                 await update.message.reply_text("❌ Invalid number")
     
     async def analyze_token(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Analyze token"""
         if len(context.args) == 0:
             await update.message.reply_text("Usage: /analyze 0x...")
             return
@@ -221,28 +190,31 @@ class TradingBot:
                 risk = "🟢 LOW"
             elif score >= 60:
                 position = 15
-                risk = "🟡 MEDIUM"
+                risk = "🟡 MED"
             elif score >= 40:
                 position = 8
                 risk = "🔴 HIGH"
             else:
                 position = 2
-                risk = "🔴 VERY HIGH"
+                risk = "🔴 VERY"
+            
+            liq = token_data.get('liquidity', {}).get('usd', 0) if token_data else 0
+            vol = token_data.get('volume', {}).get('h24', 0) if token_data else 0
+            change = token_data.get('priceChange', {}).get('h24', 0) if token_data else 0
             
             rapport = f"""
-🔍 **TOKEN ANALYSIS**
+🔍 **ANALYSIS**
 
 **Score: {score}/100** {risk}
 
 📊 **DATA:**
-• Liquidity: ${token_data.get('liquidity', {}).get('usd', 0) if token_data else 0:,.0f}
-• Vol 24h: ${token_data.get('volume', {}).get('h24', 0) if token_data else 0:,.0f}
-• Change 24h: {token_data.get('priceChange', {}).get('h24', 0) if token_data else 0:.1f}%
+• Liquidity: ${liq:,.0f}
+• Vol 24h: ${vol:,.0f}
+• Change: {change:.1f}%
 
-💰 **RECOMMENDATION:**
-Position: **{position}%** of your budget
+💰 **Position: {position}%**
 
-🔗 **CA:** `{ca}`
+🔗 CA: `{ca}`
 """
             
             await msg.edit_text(rapport, parse_mode='Markdown')
@@ -251,31 +223,25 @@ Position: **{position}%** of your budget
                 [InlineKeyboardButton("✅ BUY", callback_data=f"buy_{ca}"),
                  InlineKeyboardButton("❌ PASS", callback_data="pass")]
             ])
-            await update.message.reply_text("Action?", reply_markup=keyboard)
+            await update.message.reply_text("?", reply_markup=keyboard)
             
         except Exception as e:
-            logger.error(f"Error: {e}")
+            logger.error(f"Analyze error: {e}")
             await msg.edit_text(f"❌ Error: {str(e)}")
     
     async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle buttons"""
         query = update.callback_query
         await query.answer()
         
         if query.data.startswith("buy_"):
             ca = query.data.replace("buy_", "")
-            await query.edit_message_text(
-                f"✅ **BUY CONFIRMED**\n\n"
-                f"**CA:** `{ca}`\n\n"
-                f"Paste in BasedBot and buy! 🚀"
-            )
+            await query.edit_message_text(f"✅ **BUY**\n\nCA: `{ca}`\n\nPaste in BasedBot! 🚀")
         elif query.data == "pass":
             await query.edit_message_text("⏭️ Skipped")
     
     async def user_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """User status"""
         if not supabase:
-            await update.message.reply_text("⚠️ Database offline")
+            await update.message.reply_text("⚠️ DB offline")
             return
         
         try:
@@ -287,19 +253,13 @@ Position: **{position}%** of your budget
             
             total_profit = sum([t.get('profit_loss', 0) for t in trades.data])
             
-            msg = f"""
-📊 **YOUR PORTFOLIO**
-
-💰 Total P&L: ${total_profit:+.2f}
-📈 Total trades: {len(trades.data)}
-"""
+            msg = f"📊 **PORTFOLIO**\n\n💰 P&L: ${total_profit:+.2f}\n📈 Trades: {len(trades.data)}"
             await update.message.reply_text(msg, parse_mode='Markdown')
         except Exception as e:
             logger.error(f"Status error: {e}")
             await update.message.reply_text("❌ Error")
     
     def run(self):
-        """Run bot"""
         logger.info("🤖 Bot starting...")
         self.app.run_polling()
 
